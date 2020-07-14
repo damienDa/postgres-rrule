@@ -10,7 +10,7 @@ RETURNS TEXT AS $$
     || COALESCE('BYSECOND=' || _rrule.array_join($1."bysecond", ',') || ';', '')
     || COALESCE('BYMINUTE=' || _rrule.array_join($1."byminute", ',') || ';', '')
     || COALESCE('BYHOUR=' || _rrule.array_join($1."byhour", ',') || ';', '')
-    || COALESCE('BYDAY=' || _rrule.array_join($1."byday", ',') || ';', '')
+    || COALESCE('BYDAY=' || _rrule.get_text_days($1."bynthday", $1."byday", ',') || ';', '')
     || COALESCE('BYMONTHDAY=' || _rrule.array_join($1."bymonthday", ',') || ';', '')
     || COALESCE('BYYEARDAY=' || _rrule.array_join($1."byyearday", ',') || ';', '')
     || COALESCE('BYWEEKNO=' || _rrule.array_join($1."byweekno", ',') || ';', '')

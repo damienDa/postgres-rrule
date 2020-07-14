@@ -31,6 +31,7 @@ CREATE TABLE _rrule.RRULE (
   "bymonth" INTEGER[] CHECK (0 < ALL("bymonth") AND 12 >= ALL("bymonth")),
   "bysetpos" INTEGER[] CHECK(366 >= ALL("bysetpos") AND 0 <> ALL("bysetpos") AND -366 <= ALL("bysetpos")),
   "wkst" _rrule.DAY,
+  "bynthday" INTEGER
 
   CONSTRAINT freq_yearly_if_byweekno CHECK("freq" = 'YEARLY' OR "byweekno" IS NULL)
 );

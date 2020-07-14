@@ -24,7 +24,8 @@ BEGIN
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYWEEKNO') AS "byweekno",
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYMONTH') AS "bymonth",
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYSETPOS') AS "bysetpos",
-      (SELECT "val"::_rrule.DAY FROM "tokens" WHERE "key" = 'WKST') AS "wkst"
+      (SELECT "val"::_rrule.DAY FROM "tokens" WHERE "key" = 'WKST') AS "wkst",
+      (SELECT _rrule.nth_day("val") FROM "tokens" WHERE "key" = 'BYDAY')::INTEGER AS "bynthday"
   )
   SELECT
     "freq",
@@ -42,7 +43,8 @@ BEGIN
     "bymonth",
     "bysetpos",
     -- DEFAULT value for wkst
-    COALESCE("wkst", 'MO') AS "wkst"
+    COALESCE("wkst", 'MO') AS "wkst",
+    "bynthday"
   INTO result
   FROM candidate;
 

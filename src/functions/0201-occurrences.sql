@@ -1,9 +1,20 @@
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences(
+--WITH start AS (SELECT start_date::TIMESTAMP from data.appointment limit 10)
+--SELECT start_date, _rrule.last('RRULE:FREQ=MONTHLY;INTERVAL=1;BYDAY=+1FR;COUNT=3'::TEXT::_rrule.RRULE, start_date::TIMESTAMP) FROM start;
+
+--+3MO =>
+-- bymonthday=1, FREQ=MONTHLY, NO BY DAY
+-- BYDAY=MO, FREQ=WEEKELY, COUNT=bynthday
+
+-- ('MONTHLY'::_rrule.FREQ, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)::_rrule.RRULE
+
+SET lc_messages TO 'en_US.UTF-8';
+
+CREATE OR REPLACE FUNCTION _rrule.classic_occurrences(
   "rrule" _rrule.RRULE,
   "dtstart" TIMESTAMP
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS TIMESTAMP[] AS $$
   WITH "starts" AS (
     SELECT "start"
     FROM _rrule.all_starts($1, $2) "start"
@@ -32,11 +43,75 @@ RETURNS SETOF TIMESTAMP AS $$
       "occurrence"
     FROM "ordered"
   )
-  SELECT "occurrence"
+  SELECT array_agg("occurrence" ORDER BY "occurrence")
   FROM "tagged"
   WHERE "row_number" <= "rrule"."count"
-  OR "rrule"."count" IS NULL
-  ORDER BY "occurrence";
+  OR "rrule"."count" IS NULL;
+$$ LANGUAGE SQL STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _rrule.nth_occurrences(
+  "rrule" _rrule.RRULE,
+  "dtstart" TIMESTAMP
+)
+RETURNS TIMESTAMP[] AS $$
+DECLARE
+  l_month_recurrence _rrule.RRULE;
+  l_week_recurrence _rrule.RRULE;
+  l_occurrences TIMESTAMP[];
+  l_result_occurrences TIMESTAMP[];
+  l_day _rrule.DAY;
+BEGIN
+  l_month_recurrence := $1;
+  l_month_recurrence."freq" := 'MONTHLY'::_rrule.freq;
+  l_month_recurrence."bymonthday" := '{1}';
+  l_month_recurrence."byday" := NULL;
+  l_month_recurrence."bynthday" := NULL;
+
+  FOREACH l_day IN ARRAY $1."byday"
+  LOOP
+    l_week_recurrence := $1;
+    l_week_recurrence."byday" := ARRAY [l_day];
+    l_week_recurrence."freq" := 'WEEKLY'::_rrule.freq;
+    l_week_recurrence."count" := $1."bynthday";
+    l_week_recurrence."bynthday" := NULL;
+
+    RAISE NOTICE '% %', l_month_recurrence, l_week_recurrence;
+
+    WITH "starts" AS (
+      SELECT "start"
+      FROM _rrule.occurrences(l_month_recurrence, $2) "start"
+    )
+    SELECT array_agg(_rrule.last(l_week_recurrence, "start")) 
+      FROM "starts" INTO l_occurrences;
+    
+    l_result_occurrences := l_result_occurrences || l_occurrences;
+
+  END LOOP;
+
+RAISE NOTICE '%', l_result_occurrences;
+
+  SELECT array_agg(x) from (SELECT unnest(l_result_occurrences) as x ORDER BY x) as sub INTO l_result_occurrences;
+
+RAISE NOTICE '%', l_result_occurrences;
+
+
+  RETURN l_result_occurrences;
+END;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _rrule.occurrences(
+  "rrule" _rrule.RRULE,
+  "dtstart" TIMESTAMP
+)
+RETURNS SETOF TIMESTAMP AS $$
+  SELECT unnest(
+    CASE WHEN $1."bynthday" IS NULL 
+    THEN 
+      _rrule.classic_occurrences($1, $2)
+    ELSE
+      _rrule.nth_occurrences($1, $2)
+    END
+  )
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "between" TSRANGE)

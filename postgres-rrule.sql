@@ -38,6 +38,7 @@ CREATE TABLE _rrule.RRULE (
   "bymonth" INTEGER[] CHECK (0 < ALL("bymonth") AND 12 >= ALL("bymonth")),
   "bysetpos" INTEGER[] CHECK(366 >= ALL("bysetpos") AND 0 <> ALL("bysetpos") AND -366 <= ALL("bysetpos")),
   "wkst" _rrule.DAY,
+  "bynthday" INTEGER
 
   CONSTRAINT freq_yearly_if_byweekno CHECK("freq" = 'YEARLY' OR "byweekno" IS NULL)
 );
@@ -155,13 +156,39 @@ COMMENT ON FUNCTION _rrule.integer_array (text) IS 'Coerce a text string into an
 
 
 
+CREATE OR REPLACE FUNCTION _rrule.nth_day_array (TEXT)
+RETURNS RECORD AS $$
+  DECLARE
+    i INTEGER;
+	l_tmp_day TEXT;
+	l_arr TEXT[];
+	nthday TEXT;
+	days _rrule.DAY[];
+  BEGIN
+  nthday := 3;
+  	SELECT ('{' || $1 || '}')::TEXT[] INTO l_arr;
+	  FOR i IN array_lower(l_arr, 1) .. array_upper(l_arr, 1) 
+	  LOOP
+		l_tmp_day := RIGHT(l_arr[i],2);
+		days := days || l_tmp_day::_rrule.DAY;
+		nthday := REPLACE(l_arr[i], l_tmp_day, '');
+	  END LOOP;
+	 RETURN (nthday, days);
+  END;
+$$ LANGUAGE plpgsql;
+
+
 CREATE OR REPLACE FUNCTION _rrule.day_array (TEXT)
 RETURNS _rrule.DAY[] AS $$
-  SELECT ('{' || $1 || '}')::_rrule.DAY[];
+  SELECT days FROM _rrule.nth_day_array ($1) AS (nthday TEXT, days _rrule.DAY[]);
 $$ LANGUAGE SQL IMMUTABLE STRICT;
 COMMENT ON FUNCTION _rrule.day_array (text) IS 'Coerce a text string into an array of "rrule"."day"';
 
-
+CREATE OR REPLACE FUNCTION _rrule.nth_day (TEXT)
+RETURNS TEXT AS $$
+  SELECT CASE WHEN nthday = '' THEN NULL ELSE nthday END FROM _rrule.nth_day_array ($1) AS (nthday TEXT, days _rrule.DAY[]);
+$$ LANGUAGE SQL IMMUTABLE STRICT;
+COMMENT ON FUNCTION _rrule.nth_day (text) IS 'Coerce a text string into an array of "rrule"."day"';
 
 CREATE OR REPLACE FUNCTION _rrule.array_join(ANYARRAY, "delimiter" TEXT)
 RETURNS TEXT AS $$
@@ -169,6 +196,25 @@ RETURNS TEXT AS $$
   FROM unnest($1) x;
 $$ LANGUAGE SQL IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION _rrule.get_text_days(nthday INTEGER, days _rrule.DAY[], delimiter TEXT)
+RETURNS TEXT AS $$
+DECLARE 
+	l_tmp _rrule.DAY;
+	l_out TEXT;
+BEGIN
+  IF days IS NULL
+  THEN
+	RETURN NULL;
+  END IF;
+
+  l_out := '';
+  FOREACH l_tmp IN ARRAY days
+  LOOP
+	l_out := l_out || CASE WHEN nthday IS NULL THEN '' ELSE nthday::TEXT END || l_tmp || delimiter;
+  END LOOP;
+  RETURN LEFT(l_out, char_length(l_out) - 1);
+END;
+$$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION _rrule.explode(_rrule.RRULE)
 RETURNS SETOF _rrule.RRULE AS 'SELECT $1' LANGUAGE SQL IMMUTABLE STRICT;
 COMMENT ON FUNCTION _rrule.explode (_rrule.RRULE) IS 'Helper function to allow SELECT * FROM explode(rrule)';
@@ -376,7 +422,8 @@ BEGIN
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYWEEKNO') AS "byweekno",
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYMONTH') AS "bymonth",
       (SELECT _rrule.integer_array("val") FROM "tokens" WHERE "key" = 'BYSETPOS') AS "bysetpos",
-      (SELECT "val"::_rrule.DAY FROM "tokens" WHERE "key" = 'WKST') AS "wkst"
+      (SELECT "val"::_rrule.DAY FROM "tokens" WHERE "key" = 'WKST') AS "wkst",
+      (SELECT _rrule.nth_day("val") FROM "tokens" WHERE "key" = 'BYDAY')::INTEGER AS "bynthday"
   )
   SELECT
     "freq",
@@ -394,7 +441,8 @@ BEGIN
     "bymonth",
     "bysetpos",
     -- DEFAULT value for wkst
-    COALESCE("wkst", 'MO') AS "wkst"
+    COALESCE("wkst", 'MO') AS "wkst",
+    "bynthday"
   INTO result
   FROM candidate;
 
@@ -416,7 +464,7 @@ RETURNS TEXT AS $$
     || COALESCE('BYSECOND=' || _rrule.array_join($1."bysecond", ',') || ';', '')
     || COALESCE('BYMINUTE=' || _rrule.array_join($1."byminute", ',') || ';', '')
     || COALESCE('BYHOUR=' || _rrule.array_join($1."byhour", ',') || ';', '')
-    || COALESCE('BYDAY=' || _rrule.array_join($1."byday", ',') || ';', '')
+    || COALESCE('BYDAY=' || _rrule.get_text_days($1."bynthday", $1."byday", ',') || ';', '')
     || COALESCE('BYMONTHDAY=' || _rrule.array_join($1."bymonthday", ',') || ';', '')
     || COALESCE('BYYEARDAY=' || _rrule.array_join($1."byyearday", ',') || ';', '')
     || COALESCE('BYWEEKNO=' || _rrule.array_join($1."byweekno", ',') || ';', '')
@@ -499,11 +547,22 @@ $$ LANGUAGE plpgsql STRICT IMMUTABLE;
 
 
 
-CREATE OR REPLACE FUNCTION _rrule.occurrences(
+--WITH start AS (SELECT start_date::TIMESTAMP from data.appointment limit 10)
+--SELECT start_date, _rrule.last('RRULE:FREQ=MONTHLY;INTERVAL=1;BYDAY=+1FR;COUNT=3'::TEXT::_rrule.RRULE, start_date::TIMESTAMP) FROM start;
+
+--+3MO =>
+-- bymonthday=1, FREQ=MONTHLY, NO BY DAY
+-- BYDAY=MO, FREQ=WEEKELY, COUNT=bynthday
+
+-- ('MONTHLY'::_rrule.FREQ, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)::_rrule.RRULE
+
+SET lc_messages TO 'en_US.UTF-8';
+
+CREATE OR REPLACE FUNCTION _rrule.classic_occurrences(
   "rrule" _rrule.RRULE,
   "dtstart" TIMESTAMP
 )
-RETURNS SETOF TIMESTAMP AS $$
+RETURNS TIMESTAMP[] AS $$
   WITH "starts" AS (
     SELECT "start"
     FROM _rrule.all_starts($1, $2) "start"
@@ -532,11 +591,75 @@ RETURNS SETOF TIMESTAMP AS $$
       "occurrence"
     FROM "ordered"
   )
-  SELECT "occurrence"
+  SELECT array_agg("occurrence" ORDER BY "occurrence")
   FROM "tagged"
   WHERE "row_number" <= "rrule"."count"
-  OR "rrule"."count" IS NULL
-  ORDER BY "occurrence";
+  OR "rrule"."count" IS NULL;
+$$ LANGUAGE SQL STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _rrule.nth_occurrences(
+  "rrule" _rrule.RRULE,
+  "dtstart" TIMESTAMP
+)
+RETURNS TIMESTAMP[] AS $$
+DECLARE
+  l_month_recurrence _rrule.RRULE;
+  l_week_recurrence _rrule.RRULE;
+  l_occurrences TIMESTAMP[];
+  l_result_occurrences TIMESTAMP[];
+  l_day _rrule.DAY;
+BEGIN
+  l_month_recurrence := $1;
+  l_month_recurrence."freq" := 'MONTHLY'::_rrule.freq;
+  l_month_recurrence."bymonthday" := '{1}';
+  l_month_recurrence."byday" := NULL;
+  l_month_recurrence."bynthday" := NULL;
+
+  FOREACH l_day IN ARRAY $1."byday"
+  LOOP
+    l_week_recurrence := $1;
+    l_week_recurrence."byday" := ARRAY [l_day];
+    l_week_recurrence."freq" := 'WEEKLY'::_rrule.freq;
+    l_week_recurrence."count" := $1."bynthday";
+    l_week_recurrence."bynthday" := NULL;
+
+    RAISE NOTICE '% %', l_month_recurrence, l_week_recurrence;
+
+    WITH "starts" AS (
+      SELECT "start"
+      FROM _rrule.occurrences(l_month_recurrence, $2) "start"
+    )
+    SELECT array_agg(_rrule.last(l_week_recurrence, "start")) 
+      FROM "starts" INTO l_occurrences;
+    
+    l_result_occurrences := l_result_occurrences || l_occurrences;
+
+  END LOOP;
+
+RAISE NOTICE '%', l_result_occurrences;
+
+  SELECT array_agg(x) from (SELECT unnest(l_result_occurrences) as x ORDER BY x) as sub INTO l_result_occurrences;
+
+RAISE NOTICE '%', l_result_occurrences;
+
+
+  RETURN l_result_occurrences;
+END;
+$$ LANGUAGE plpgsql STRICT IMMUTABLE;
+
+CREATE OR REPLACE FUNCTION _rrule.occurrences(
+  "rrule" _rrule.RRULE,
+  "dtstart" TIMESTAMP
+)
+RETURNS SETOF TIMESTAMP AS $$
+  SELECT unnest(
+    CASE WHEN $1."bynthday" IS NULL 
+    THEN 
+      _rrule.classic_occurrences($1, $2)
+    ELSE
+      _rrule.nth_occurrences($1, $2)
+    END
+  )
 $$ LANGUAGE SQL STRICT IMMUTABLE;
 
 CREATE OR REPLACE FUNCTION _rrule.occurrences("rrule" _rrule.RRULE, "dtstart" TIMESTAMP, "between" TSRANGE)
